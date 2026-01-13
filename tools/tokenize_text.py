@@ -1,13 +1,13 @@
 import argparse
 import json
-import multiprocessing as mp
-import os
 import warnings
+from pathlib import Path
 
 import numpy as np
 from huggingface_hub import hf_hub_download
 from sentencepiece import SentencePieceProcessor
-from tqdm import tqdm
+
+from .utils import execute_data_processing
 
 
 def encode_as_pieces_wo_byte_fallback(sp: SentencePieceProcessor, text: str) -> list[str]:
@@ -51,7 +51,7 @@ def tokenize_and_pad_text(
     """
     # assert single speaker
     speakers = [seg["speaker"] for seg in word_transcript]
-    assert len(set(speakers)) == 1
+    assert 0 <= len(set(speakers)) <= 2
 
     # sort the word transcript by the start time
     word_transcript = sorted(word_transcript, key=lambda x: x["start"])
@@ -136,74 +136,81 @@ def tokenize_and_pad_text(
     return token_ids
 
 
-def worker(process_id: int, dialogue_names: list[str], args: argparse.Namespace):
-    sp = SentencePieceProcessor(hf_hub_download(args.text_tokenizer_repo, args.text_tokenizer_name))
-    pbar = tqdm(dialogue_names, desc=f"Worker {process_id}", dynamic_ncols=True)
-    for dialogue_name in pbar:
-        pbar.set_postfix_str(dialogue_name)
+processor: SentencePieceProcessor | None = None
 
-        # load word-level transcript
-        with open(os.path.join(args.word_transcript_dir, f"{dialogue_name}.json")) as f:
-            word_transcript = json.load(f)
 
-        # tokenize text
-        word_transcript_A = [seg for seg in word_transcript if seg["speaker"] == "A"]
-        token_ids_A = tokenize_and_pad_text(
-            word_transcript=word_transcript_A,
-            no_whitespace_before_word=args.no_whitespace_before_word,
-            text_tokenizer=sp,
-            text_padding_id=args.text_padding_id,
-            end_of_text_padding_id=args.end_of_text_padding_id,
-            audio_tokenizer_frame_rate=args.audio_tokenizer_frame_rate,
-        )
-        word_transcript_B = [seg for seg in word_transcript if seg["speaker"] == "B"]
-        token_ids_B = tokenize_and_pad_text(
-            word_transcript=word_transcript_B,
-            no_whitespace_before_word=args.no_whitespace_before_word,
-            text_tokenizer=sp,
-            text_padding_id=args.text_padding_id,
-            end_of_text_padding_id=args.end_of_text_padding_id,
-            audio_tokenizer_frame_rate=args.audio_tokenizer_frame_rate,
+def process_dialogue(worker_id: int, data: tuple[str, argparse.Namespace]):
+    """Process a single dialogue by tokenizing its word-level transcript.
+
+    Args:
+        worker_id: ID of the worker process (not used but required by execute_data_processing).
+        data: Tuple containing (dialogue_name, args).
+    """
+    dialogue_name, args = data
+
+    # initialize processor once per process
+    global processor
+    if processor is None:
+        processor = SentencePieceProcessor(
+            hf_hub_download(args.text_tokenizer_repo, args.text_tokenizer_name)
         )
 
-        # save the tokenized text
-        output_path = os.path.join(args.output_dir, f"{dialogue_name}.npz")
-        try:
-            np.savez_compressed(output_path, A=token_ids_A, B=token_ids_B)
-        except Exception as e:
-            print(f"Error in saving {output_path}: {e}")
-            os.remove(output_path)
+    # load word-level transcript
+    transcript_path = Path(args.word_transcript_dir) / f"{dialogue_name}.json"
+    with open(transcript_path) as f:
+        word_transcript = json.load(f)
+
+    # tokenize text
+    word_transcript_A = [seg for seg in word_transcript if seg["speaker"] == "A"]
+    token_ids_A = tokenize_and_pad_text(
+        word_transcript=word_transcript_A,
+        no_whitespace_before_word=args.no_whitespace_before_word,
+        text_tokenizer=processor,
+        text_padding_id=args.text_padding_id,
+        end_of_text_padding_id=args.end_of_text_padding_id,
+        audio_tokenizer_frame_rate=args.audio_tokenizer_frame_rate,
+    )
+    word_transcript_B = [seg for seg in word_transcript if seg["speaker"] == "B"]
+    token_ids_B = tokenize_and_pad_text(
+        word_transcript=word_transcript_B,
+        no_whitespace_before_word=args.no_whitespace_before_word,
+        text_tokenizer=processor,
+        text_padding_id=args.text_padding_id,
+        end_of_text_padding_id=args.end_of_text_padding_id,
+        audio_tokenizer_frame_rate=args.audio_tokenizer_frame_rate,
+    )
+
+    # save the tokenized text
+    output_path = Path(args.output_dir) / f"{dialogue_name}.npz"
+    try:
+        np.savez_compressed(output_path, A=token_ids_A, B=token_ids_B)
+    except Exception as e:
+        print(f"Error in saving {output_path}: {e}")
+        output_path.unlink(missing_ok=True)
 
 
 def main(args):
-    dialogue_names = [
-        os.path.splitext(d)[0] for d in os.listdir(args.word_transcript_dir) if d.endswith(".json")
-    ]
+    word_transcript_dir = Path(args.word_transcript_dir)
+    output_dir = Path(args.output_dir)
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    dialogue_names = sorted(p.stem for p in word_transcript_dir.glob("*.json"))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
     if args.resume:
-        tokenized_dialogue_names = [
-            os.path.splitext(d)[0] for d in os.listdir(args.output_dir) if d.endswith(".npz")
-        ]
+        tokenized_dialogue_names = [p.stem for p in output_dir.glob("*.npz")]
         print(f"Skipping {len(tokenized_dialogue_names)} already tokenized dialogues.")
-        dialogue_names = list(set(dialogue_names) - set(tokenized_dialogue_names))
+        dialogue_names = sorted(set(dialogue_names) - set(tokenized_dialogue_names))
 
-    if args.num_workers == 1:
-        worker(0, dialogue_names, args)
+    # Create dataset iterator that yields (dialogue_name, args) tuples
+    dataset = ((name, args) for name in dialogue_names)
 
-    else:
-        dialogue_names_per_worker = np.array_split(dialogue_names, args.num_workers)
-        print(
-            f"Each of {args.num_workers} workers processes {len(dialogue_names_per_worker[0])} dialogues."
-        )
-
-        processes = []
-        for i, dialogue_names in enumerate(dialogue_names_per_worker):
-            p = mp.Process(target=worker, args=(i, dialogue_names, args))
-            p.start()
-            processes.append(p)
-        for p in processes:
-            p.join()
+    # Execute data processing using the utility function
+    execute_data_processing(
+        dataset=dataset,
+        process_func=process_dialogue,
+        num_workers=args.num_workers,
+        data_count=len(dialogue_names),
+    )
 
 
 if __name__ == "__main__":
