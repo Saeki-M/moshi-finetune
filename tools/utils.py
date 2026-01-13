@@ -29,8 +29,8 @@ def execute_data_processing(
     ):
         # Track which worker is handling which future
         futures: dict[Future[Any], int] = {}
-        # Track next worker_id to assign (round-robin, starting from 1)
-        next_worker_id = 1
+        # Track next worker_id to assign (round-robin)
+        next_worker_id = 0
 
         # Submit initial jobs for each worker
         for _ in range(num_workers):
@@ -38,7 +38,7 @@ def execute_data_processing(
                 data = next(dataset)
                 future = executor.submit(process_func, next_worker_id, data)
                 futures[future] = next_worker_id
-                next_worker_id = next_worker_id % num_workers + 1
+                next_worker_id = (next_worker_id + 1) % num_workers
             except StopIteration:
                 break
 

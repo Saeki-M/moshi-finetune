@@ -1,13 +1,14 @@
 import argparse
-import multiprocessing as mp
-import os
+from functools import partial
+from pathlib import Path
 
 import numpy as np
 import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
 from moshi.models import MimiModel, loaders
-from tqdm import tqdm
+
+from .utils import execute_data_processing
 
 
 def ceil(x, y):
@@ -46,73 +47,69 @@ def tokenize_audio(
     return audio_ids
 
 
-def worker(process_id: int, dialogue_names: list[str], args: argparse.Namespace):
-    device = torch.device("cuda", process_id)
-    mimi = loaders.get_mimi(
-        filename=hf_hub_download(args.audio_tokenizer_repo, args.audio_tokenizer_name),
-        device=device,
-    )
-    pbar = tqdm(dialogue_names, desc=f"Worker {process_id}", dynamic_ncols=True)
+mimi: MimiModel | None = None
 
-    for dialogue_name in pbar:
-        pbar.set_postfix_str(dialogue_name)
 
-        # load audio
-        wavs, sr = torchaudio.load(os.path.join(args.audio_dir, f"{dialogue_name}.wav"))
-        assert wavs.shape[0] == 2, f"Expected stereo audio, got {wavs.shape[0]} channels."
-        resampler = torchaudio.transforms.Resample(sr, mimi.sample_rate).to(device)
-        wavs = resampler(wavs.to(device))
+def process_dialogue(worker_id: int, audio_path: Path, args: argparse.Namespace) -> None:
+    """Process a single dialogue: load audio, tokenize, and save.
 
-        # tokenize audio
-        audio_ids_A = tokenize_audio(wavs[0], mimi, args.audio_chunk_size)
-        audio_ids_B = tokenize_audio(wavs[1], mimi, args.audio_chunk_size)
+    Args:
+        worker_id: Worker ID, used to determine GPU device
+        audio_path: Path to the audio file to process
+        args: Command line arguments containing configuration
+    """
+    # Initialize mimi for this worker
+    global mimi
+    if mimi is None:
+        num_devices = torch.cuda.device_count()
+        device_id = worker_id % num_devices
+        torch.cuda.set_device(device_id)
+        mimi = loaders.get_mimi(
+            filename=hf_hub_download(args.audio_tokenizer_repo, args.audio_tokenizer_name),
+            device="cuda",
+        )
 
-        # save tokenized audio
-        output_path = os.path.join(args.output_dir, f"{dialogue_name}.npz")
-        try:
-            np.savez_compressed(output_path, A=audio_ids_A.numpy(), B=audio_ids_B.numpy())
-        except Exception as e:
-            print(f"Failed to save {output_path}: {e}")
-            os.remove(output_path)
+    wavs, sr = torchaudio.load(audio_path)
+    assert wavs.shape[0] == 2, f"Expected stereo audio, got {wavs.shape[0]} channels."
+    resampler = torchaudio.transforms.Resample(sr, mimi.sample_rate).to("cuda")
+    wavs = resampler(wavs.to("cuda"))
+
+    # Tokenize audio
+    audio_ids_A = tokenize_audio(wavs[0], mimi, args.audio_chunk_size)
+    audio_ids_B = tokenize_audio(wavs[1], mimi, args.audio_chunk_size)
+
+    # Save tokenized audio
+    dialogue_name = audio_path.stem
+    output_path = Path(args.output_dir) / f"{dialogue_name}.npz"
+    try:
+        np.savez_compressed(output_path, A=audio_ids_A.numpy(), B=audio_ids_B.numpy())
+    except Exception as e:
+        print(f"Failed to save {output_path}: {e}")
+        output_path.unlink(missing_ok=True)
 
 
 def main(args):
-    dialogue_names = [
-        os.path.splitext(d)[0] for d in os.listdir(args.audio_dir) if d.endswith(".wav")
-    ]
+    audio_dir = Path(args.audio_dir)
+    output_dir = Path(args.output_dir)
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Collect dialogue names from both .wav and .flac files
+    audio_files = list(audio_dir.glob("*.wav")) + list(audio_dir.glob("*.flac"))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
     if args.resume:
-        tokenized_dialogue_names = [
-            os.path.splitext(d)[0] for d in os.listdir(args.output_dir) if d.endswith(".npz")
-        ]
-        print(f"Skipping {len(tokenized_dialogue_names)} already tokenized dialogues.")
-        dialogue_names = list(set(dialogue_names) - set(tokenized_dialogue_names))
+        tokenized_dialogues = {p.stem for p in output_dir.glob("*.npz")}
+        print(f"Skipping {len(tokenized_dialogues)} already tokenized dialogues.")
+        audio_files = [f for f in audio_files if f.stem not in tokenized_dialogues]
 
-    if args.num_workers == 1:
-        worker(0, dialogue_names, args)
+    print(f"Processing {len(audio_files)} dialogues using {args.num_workers} workers.")
 
-    else:
-        num_devices = torch.cuda.device_count()
-        if args.num_workers > num_devices:
-            print(
-                f"Number of workers ({args.num_workers}) exceeds number of available GPUs ({num_devices})."
-            )
-            args.num_workers = num_devices
-            print(f"Using {args.num_workers} workers.")
-
-        dialogue_names_per_worker = np.array_split(dialogue_names, args.num_workers)
-        print(
-            f"Each of {args.num_workers} workers processes {len(dialogue_names_per_worker[0])} dialogues."
-        )
-
-        processes = []
-        for i, dialogue_names in enumerate(dialogue_names_per_worker):
-            p = mp.Process(target=worker, args=(i, dialogue_names, args))
-            p.start()
-            processes.append(p)
-        for p in processes:
-            p.join()
+    # Use execute_data_processing for parallel execution with partial to pass args
+    execute_data_processing(
+        dataset=iter(sorted(audio_files)),
+        process_func=partial(process_dialogue, args=args),
+        num_workers=args.num_workers,
+        data_count=len(audio_files),
+    )
 
 
 if __name__ == "__main__":
@@ -124,7 +121,7 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help=(
-            "Path to the directory containing the stereo wav files. "
+            "Path to the directory containing the stereo audio files (wav or flac). "
             "Left and right channels should be the audio of speaker A and B respectively. "
             "and filenames should be the same as the dialogue names in the word transcript directory."
         ),

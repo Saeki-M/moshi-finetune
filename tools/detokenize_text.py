@@ -180,16 +180,34 @@ def process_dialogue(worker_id: int, dialogue_name: str, args: argparse.Namespac
 
 
 def main(args):
-    tokenized_dir = Path(args.tokenized_dir)
+    tokenized_input = Path(args.tokenized_input)
     output_dir = Path(args.output_dir)
-
-    dialogue_names = {p.stem for p in tokenized_dir.glob("*.npz")}
-
     output_dir.mkdir(parents=True, exist_ok=True)
-    if args.resume:
-        detokenized_dialogue_names = {p.stem for p in output_dir.glob("*.json")}
-        print(f"Skipping {len(detokenized_dialogue_names)} already detokenized dialogues.")
-        dialogue_names = dialogue_names - detokenized_dialogue_names
+
+    # Check if input is a file or directory
+    if tokenized_input.is_file():
+        # Process single file
+        if tokenized_input.suffix != ".npz":
+            raise ValueError(f"Input file must be a .npz file, got: {tokenized_input}")
+
+        dialogue_names = {tokenized_input.stem}
+        # Update args to use the parent directory for processing
+        args.tokenized_dir = str(tokenized_input.parent)
+    elif tokenized_input.is_dir():
+        # Process directory
+        args.tokenized_dir = str(tokenized_input)
+        dialogue_names = {p.stem for p in tokenized_input.glob("*.npz")}
+
+        if args.resume:
+            detokenized_dialogue_names = {p.stem for p in output_dir.glob("*.json")}
+            print(f"Skipping {len(detokenized_dialogue_names)} already detokenized dialogues.")
+            dialogue_names = dialogue_names - detokenized_dialogue_names
+    else:
+        raise ValueError(f"Input path does not exist: {tokenized_input}")
+
+    if not dialogue_names:
+        print("No files to process.")
+        return
 
     # Execute data processing using the utility function
     execute_data_processing(
@@ -205,10 +223,10 @@ if __name__ == "__main__":
         description="Detokenize token IDs back to word-level transcripts with timestamps."
     )
     parser.add_argument(
-        "--tokenized_dir",
+        "--tokenized_input",
         type=str,
         required=True,
-        help="Path to the directory containing tokenized data (.npz files).",
+        help="Path to a tokenized .npz file or directory containing tokenized data (.npz files).",
     )
     parser.add_argument(
         "--output_dir",
