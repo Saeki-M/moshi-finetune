@@ -76,16 +76,22 @@ def decode_tokens(rank: int, list_of_tokens_path: list[str], args: argparse.Name
     for tokens_path in tqdm(list_of_tokens_path, desc=f"Rank {rank}"):
         tokens = np.load(tokens_path)  # (1+K, T)
 
-        text_tokens = tokens[0]  # noqa: F841
+        text_tokens: np.ndarray = tokens[0]
         audio_tokens = tokens[1:]
 
-        # text = decode_text(text_tokens, text_tokenizer) # str
+        text_tokens = text_tokens[~np.isin(text_tokens, [0, 3])]
+        text = decode_text(text_tokens, text_tokenizer)  # str
         audio = decode_audio(audio_tokens, mimi)  # (2, wav_len)
 
-        output_wav_path = os.path.join(
-            args.output_dir, os.path.basename(tokens_path).replace(".npy", ".wav")
-        )
+        base_name = os.path.basename(tokens_path).replace(".npy", "")
+
+        # save the text
+        output_txt_path = os.path.join(args.output_dir, f"{base_name}.txt")
+        with open(output_txt_path, "w", encoding="utf-8") as f:
+            f.write(text)
+
         # save the audio
+        output_wav_path = os.path.join(args.output_dir, f"{base_name}.wav")
         sf.write(output_wav_path, audio.astype(np.float32).T, samplerate=mimi.sample_rate)
 
 

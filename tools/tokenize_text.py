@@ -36,38 +36,9 @@ def encode_as_pieces_wo_byte_fallback(sp: SentencePieceProcessor, text: str) -> 
     return tokens_wo_byte
 
 
-def tokenize_and_pad_text(
-    word_transcript: list[dict[str, str | float]],
-    no_whitespace_before_word: bool,
-    text_tokenizer: SentencePieceProcessor,
-    text_padding_id: int,
-    end_of_text_padding_id: int,
-    audio_tokenizer_frame_rate: float,
-) -> list[int]:
-    """
-    Tokenize the word transcript of single speaker.
-    Fill the appropriate frames with the tokens based on the word-level timestamps,
-    and frames without tokens are filled with the padding token.
-    """
-    # assert single speaker
-    speakers = [seg["speaker"] for seg in word_transcript]
-    assert 0 <= len(set(speakers)) <= 2
-
-    # sort the word transcript by the start time
-    word_transcript = sorted(word_transcript, key=lambda x: x["start"])
-
-    # add whitespace to the beginning of each transcript word
-    if not no_whitespace_before_word:
-        # ensure that the first word has no whitespace before it
-        word_transcript[0]["word"] = word_transcript[0]["word"].strip()
-        for seg in word_transcript[1:]:
-            seg["word"] = " " + seg["word"].strip()
-
-    # tokenize the text
-    text = "".join([seg["word"] for seg in word_transcript])
-    tokens = encode_as_pieces_wo_byte_fallback(text_tokenizer, text)
-
-    # word-level transcript to character-level transcript
+def get_char_level_transcript(word_transcript):
+    """convert word-level transcript to character-level transcript,
+    by splitting time evenly across words into characters."""
     char_transcript = []
     for seg in word_transcript:
         num_chars = len(seg["word"])
@@ -84,8 +55,14 @@ def tokenize_and_pad_text(
                     "char": char,
                 }
             )
+    return char_transcript
 
+
+def get_token_level_transcript(char_transcript, text_tokenizer):
     # make token-level transcript by aligning the timestamps
+    text = "".join([seg["char"] for seg in char_transcript])
+    tokens = encode_as_pieces_wo_byte_fallback(text_tokenizer, text)
+
     token_transcript = []
     for i, token in enumerate(tokens):
         if i == 0 and token == "▁":
@@ -96,6 +73,8 @@ def tokenize_and_pad_text(
             chars = char_transcript[: len(token) - 1]
         else:
             chars = char_transcript[: len(token)]
+
+        # print(f"{i}\t|{token}|\t|{''.join([c['char'] for c in chars])}|")
         token_transcript.append(
             {
                 "speaker": chars[0]["speaker"],
@@ -107,6 +86,96 @@ def tokenize_and_pad_text(
         # remove the characters that are already processed
         char_transcript = char_transcript[len(chars) :]
     assert not char_transcript, f"Remaining characters: {char_transcript}"
+    return token_transcript
+
+
+TEXT_NORMALIZATION_TABLE = str.maketrans(
+    {
+        "…": "", "℃": "°", "�": "", "゛": "",
+        "Ⅰ": "1", "Ⅱ": "2", "Ⅲ": "3", "Ⅳ": "4", "Ⅴ": "5", 
+        "Ⅵ": "6", "Ⅶ": "7", "Ⅷ": "8", "Ⅸ": "9", "Ⅹ": "10",
+    }
+)  # fmt: skip
+
+
+def normalize_word_transcript(word_transcript):
+    """Normalize the transcript by converting or removing unwanted characters."""
+    normalized_transcript = []
+    for seg in word_transcript:
+        word = seg["word"]
+        word = word.translate(TEXT_NORMALIZATION_TABLE)
+        if word != "":
+            normalized_transcript.append(
+                {
+                    "speaker": seg["speaker"],
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "word": word,
+                }
+            )
+    return normalized_transcript
+
+
+def normalize_char_transcript(char_transcript, no_whitespace_before_word: bool):
+    """Further normalize the character-level transcript if needed."""
+    normalized_transcript = []
+    del_leading_space = no_whitespace_before_word
+    for seg in char_transcript:
+        char = seg["char"]
+        if char == " " and del_leading_space:
+            continue
+        # if last char is Japanese or space delete leading space in the next word
+        if "\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9faf" or char == " ":
+            del_leading_space = True
+        else:
+            del_leading_space = False
+
+        normalized_transcript.append(
+            {
+                "speaker": seg["speaker"],
+                "start": seg["start"],
+                "end": seg["end"],
+                "char": char,
+            }
+        )
+    # remove trailing spaces
+    while normalized_transcript and normalized_transcript[-1]["char"] == " ":
+        normalized_transcript.pop()
+
+    return normalized_transcript
+
+
+def tokenize_and_pad_text(
+    word_transcript: list[dict[str, str | float]],
+    no_whitespace_before_word: bool,
+    text_tokenizer: SentencePieceProcessor,
+    text_padding_id: int,
+    end_of_text_padding_id: int,
+    audio_tokenizer_frame_rate: float,
+) -> list[int]:
+    """
+    Tokenize the word transcript of single speaker.
+    Fill the appropriate frames with the tokens based on the word-level timestamps,
+    and frames without tokens are filled with the padding token.
+    """
+    # assert single speaker
+    speakers = [seg["speaker"] for seg in word_transcript]
+    assert 0 <= len(set(speakers)) < 2, "Multiple speakers found in the transcript."
+
+    # sort the word transcript by the start time
+    word_transcript = sorted(word_transcript, key=lambda x: x["start"])
+
+    # add whitespace to the beginning of each transcript word
+    if not no_whitespace_before_word:
+        # ensure that the first word has no whitespace before it
+        word_transcript[0]["word"] = word_transcript[0]["word"].strip()
+        for seg in word_transcript[1:]:
+            seg["word"] = " " + seg["word"].strip()
+
+    word_transcript = normalize_word_transcript(word_transcript)
+    char_transcript = get_char_level_transcript(word_transcript)
+    char_transcript = normalize_char_transcript(char_transcript, no_whitespace_before_word)
+    token_transcript = get_token_level_transcript(char_transcript, text_tokenizer)
 
     # make tokenized ids with padding
     if token_transcript:
@@ -124,8 +193,7 @@ def tokenize_and_pad_text(
                 frame_index += 1
         except IndexError:
             warnings.warn(  # noqa: B028
-                f"Last {len(token_transcript) - token_count} tokens out of {len(token_transcript)} tokens "
-                f"are dropped due to the insufficient number of frames ({num_frames})."
+                "frames are dropped due to the insufficient number of frames."
             )
             break
         token_ids[frame_index] = text_tokenizer.piece_to_id(seg["token"])
