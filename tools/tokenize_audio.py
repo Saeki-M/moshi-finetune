@@ -92,8 +92,10 @@ def main(args):
     audio_dir = Path(args.audio_dir)
     output_dir = Path(args.output_dir)
 
-    # Collect dialogue names from both .wav and .flac files
-    audio_files = list(audio_dir.glob("*.wav")) + list(audio_dir.glob("*.flac"))
+    formats = ["wav", "flac", "mp3"]
+    audio_files = []
+    for fmt in formats:
+        audio_files.extend(list(audio_dir.glob(f"*.{fmt}")))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.resume:

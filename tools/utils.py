@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from typing import Any
@@ -23,6 +24,11 @@ def execute_data_processing(
         num_workers (int): The number of worker processes to use.
         data_count (int | None): The total number of data items to process.
     """
+    if os.getenv("DEBUG") in ("1", "true", "True"):
+        for data in tqdm(dataset, total=data_count):
+            process_func(0, data)
+        return
+
     with (
         ProcessPoolExecutor(max_workers=num_workers) as executor,
         tqdm(total=data_count, desc="Processing data") as pbar,

@@ -1,5 +1,6 @@
 import argparse
 import collections
+import glob
 import itertools
 import json
 import logging
@@ -290,13 +291,30 @@ def postprocess_args(args: argparse.Namespace):
     # check the dataset files
     if not args.train_data_files:
         raise ValueError("No training data files provided.")
+
+    # Expand glob patterns and verify existence for train files
+    expanded_train: list[str] = []
+    for p in args.train_data_files:
+        expanded_train.extend(sorted(glob.glob(p)))
+    if not expanded_train:
+        raise FileNotFoundError(
+            f"No training files matched the provided patterns: {args.train_data_files}"
+        )
+    args.train_data_files = expanded_train
+
     if args.eval_data_files is not None:
         assert isinstance(args.eval_steps, int), (
             "eval_steps is required when eval_data_files is provided."
         )
-
-    if args.report_to is not None:
-        args.with_tracking = True
+        # Expand glob patterns and verify existence for eval files
+        expanded_eval: list[str] = []
+        for p in args.eval_data_files:
+            expanded_eval.extend(sorted(glob.glob(p)))
+        if not expanded_eval:
+            raise FileNotFoundError(
+                f"No evaluation files matched the provided patterns: {args.eval_data_files}"
+            )
+        args.eval_data_files = expanded_eval
 
     if args.resume_from_checkpoint:
         assert os.path.exists(args.resume_from_checkpoint), (
