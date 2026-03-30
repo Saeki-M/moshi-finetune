@@ -134,6 +134,7 @@ class MoshiForConditionalGeneration:
         generation_length: int,
         text_sampling_params: dict[str, Any],
         audio_sampling_params: dict[str, Any],
+        model_user_stream: bool = True,
     ) -> torch.LongTensor:
         """
         Generate text and audio streams from the given prompt tokens.
@@ -165,9 +166,16 @@ class MoshiForConditionalGeneration:
 
         # generate
         list_of_tokens = []
-        last_tokens = prompt_tokens
+        last_tokens = prompt_tokens  # [B, 17, F]
         for _ in range(generation_length):
             last_tokens = self.step(last_tokens)
+            # if not model_user_stream, zero out user audio tokens
+            if not model_user_stream:
+                # last_tokens[:, 9:, :] = 2048  # or self.moshi_lm.zero_token_id?
+                # last_tokens[:, 9:, :].shape is (B, 8, 1)
+                last_tokens[:, 9:, :] = self.moshi_lm.zero_token_id
+                # print(last_tokens)
+                # raise
             list_of_tokens.append(last_tokens)
 
         # end generation

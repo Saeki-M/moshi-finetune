@@ -71,6 +71,14 @@ def parse_args():
         help="Speakers to use as the main stream",
     )
     parser.add_argument(
+        "--model_user_stream",
+        action="store_true",
+        help=(
+            "Whether the model includes the user's audio stream. "
+            "If not set, user audio codebooks will be set to zero during generation."
+        ),
+    )
+    parser.add_argument(
         "--dataset_processing_workers",
         type=int,
         default=16,
@@ -210,6 +218,7 @@ def main():
         "padding_token_ids": [moshi_lm.text_padding_token_id]
         + [moshi_lm.initial_token_id] * moshi_lm.num_audio_codebooks,
         "zero_token_id": moshi_lm.zero_token_id,
+        "model_user_stream": args.model_user_stream,
     }
     with accelerator.main_process_first():
         eval_dataset = eval_dataset.map(
@@ -271,6 +280,7 @@ def main():
     logger.info(f"  Use sampling = {args.use_sampling}")
     if args.use_sampling:
         logger.info(f"  Sampling parameters = {sampling_params}")
+    logger.info(f"  Model user stream = {args.model_user_stream}")
 
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(
@@ -287,6 +297,7 @@ def main():
             generation_length=args.generation_length,
             text_sampling_params=sampling_params,
             audio_sampling_params=sampling_params,
+            model_user_stream=args.model_user_stream,
         )
         # gen_tokens = torch.cat([prompt_tokens, gen_tokens], dim=-1).cpu().numpy()
         gen_tokens = undelay_tokens(gen_tokens, moshi_lm.delays)

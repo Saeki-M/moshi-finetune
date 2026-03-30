@@ -45,6 +45,7 @@ def decode_audio(audio_tokens: np.ndarray, mimi: loaders.MimiModel) -> np.ndarra
     device = next(mimi.parameters()).device
     # split the audio tokens to 2 channels
     tokens = np.stack(np.split(audio_tokens, 2, axis=0), axis=0)  # (2, K/2, T)
+    # tokens[1] = tokens[0]  # make both channels identical for debugging
     with torch.no_grad():
         # use batch dimension of mimi as channel dimension
         wavs = mimi.decode(torch.from_numpy(tokens).to(device=device)).cpu().numpy()

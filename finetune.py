@@ -374,7 +374,7 @@ def tempformer_forward(
     moshi_lm: MoshiForFinetuning, batch: Batch
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     # 1 Encode text
-    text_emb = moshi_lm.text_emb(batch.input_ids[:, 0])
+    text_emb = moshi_lm.text_emb(batch.input_ids[:, 0])  # [B, F, 4096]
 
     # 2 Encode audio
     audio_emb = None
@@ -389,7 +389,7 @@ def tempformer_forward(
     )
     if moshi_lm.out_norm:
         tempformer_out = moshi_lm.out_norm(tempformer_out)
-    text_logits = moshi_lm.text_linear(tempformer_out)
+    text_logits = moshi_lm.text_linear(tempformer_out)  # [B, F, text_card(32000))]
 
     # 4 Compute loss
     # Upcast to float if we need to compute the loss to avoid potential precision issues
@@ -427,12 +427,15 @@ def tempformer_forward(
 def depformer_forward(
     moshi_lm: MoshiForFinetuning,
     batch: Batch,
-    tempformer_out: torch.Tensor,
+    tempformer_out: torch.Tensor,  # [B, F, 4096]
     model_user_stream: bool,
 ) -> dict[str, torch.Tensor]:
+    # only compute system stream if model_user_stream is False
+    target_q = moshi_lm.dep_q if model_user_stream else 8
+
     # 1 Mapping tempformer's output to depformer's input
     depformer_inputs = []
-    for acb_index in range(moshi_lm.dep_q):
+    for acb_index in range(target_q):
         if moshi_lm.depformer_multi_linear:
             # use different linear layers for different audio codebooks
             depformer_input_ = moshi_lm.depformer_in[acb_index](tempformer_out[:, :-1])
@@ -440,13 +443,13 @@ def depformer_forward(
             # use the same linear layer for all audio codebooks
             depformer_input_ = moshi_lm.depformer_in[0](tempformer_out[:, :-1])
         depformer_inputs.append(depformer_input_)
-    depformer_input = torch.stack(depformer_inputs, dim=2)
+    depformer_input = torch.stack(depformer_inputs, dim=2)  # [B, F, target_q, 1024]
 
     # 2 Encode last token of each audio streams
     last_token_embs = []
     last_token_emb_ = moshi_lm.depformer_text_emb(batch.input_ids[:, 0, 1:])  # text token
     last_token_embs.append(last_token_emb_)
-    for acb_index in range(moshi_lm.dep_q - 1):
+    for acb_index in range(target_q - 1):
         last_token_emb_ = moshi_lm.depformer_emb[acb_index](
             batch.input_ids[:, moshi_lm.audio_offset + acb_index, 1:]  # audio token
         )
@@ -454,20 +457,20 @@ def depformer_forward(
     last_token_emb = torch.stack(last_token_embs, dim=2)
 
     # 3 Feed embeddings to rq-transformer
-    depformer_input = depformer_input + last_token_emb
+    depformer_input = depformer_input + last_token_emb  # [B, F, target_q, 1024]
     # flatten batch_size and num_frames
     depformer_input = torch.flatten(depformer_input, 0, 1)
-    depformer_out = moshi_lm.depformer(depformer_input)
+    depformer_out = moshi_lm.depformer(depformer_input)  # [B x F, 16, 1024]
 
     audio_logits = []
-    for acb_index in range(moshi_lm.dep_q):
+    for acb_index in range(target_q):
         if moshi_lm.depformer_multi_linear:
-            audio_logits_ = moshi_lm.linears[acb_index](depformer_out[:, acb_index])
+            audio_logits_ = moshi_lm.linears[acb_index](depformer_out[:, acb_index])  # [BxF, 2048]
         else:
             audio_logits_ = moshi_lm.linears[0](depformer_out[:, acb_index])
         audio_logits.append(audio_logits_)
     audio_logits = torch.stack(audio_logits, dim=1)
-    audio_logits = audio_logits.float()
+    audio_logits = audio_logits.float()  # [B x F, target_q, card]
     # >>> depformer_logits.shape
     # torch.Size([batch_size * num_frames, dep_q, card])
 
@@ -475,7 +478,8 @@ def depformer_forward(
     if model_user_stream:
         audio_labels = batch.labels[:, 1:, 1:].transpose(1, 2).contiguous()
     else:
-        audio_labels = batch.labels[:, 1:9, 1:].transpose(1, 2).contiguous()
+        audio_labels = batch.labels[:, 1 : 1 + target_q, 1:].transpose(1, 2).contiguous()
+
     # >>> depformer_labels.shape
     # torch.Size([batch_size, num_frames, dep_q])
 
@@ -616,7 +620,7 @@ def main():
         ],
     }
 
-    if args.with_tracking:
+    if args.report_to:
         accelerator_kwargs.update(
             {
                 "log_with": args.report_to,
@@ -711,6 +715,7 @@ def main():
         "padding_token_ids": [moshi_lm.text_padding_token_id]
         + [moshi_lm.initial_token_id] * moshi_lm.num_audio_codebooks,
         "zero_token_id": moshi_lm.zero_token_id,
+        "model_user_stream": args.model_user_stream,
     }
     dataset_columns = train_dataset.column_names
     with accelerator.main_process_first():
@@ -821,7 +826,7 @@ def main():
     # Initialize tracker
     config = vars(args)
     config["deepspeed_config"] = json.load(open(args.deepspeed_config_file))
-    if args.with_tracking and accelerator.is_main_process:
+    if args.report_to and accelerator.is_main_process:
         wandb_init_kwargs = {
             "name": os.path.basename(args.output_dir),
         }
@@ -916,7 +921,7 @@ def main():
                         f"(text: {log['loss/text_total'].item():.5f}, "
                         f"audio: {log['loss/audio_total'].item():.5f})"
                     )
-                    if args.with_tracking:
+                    if args.report_to:
                         gathered_metrics = accelerator.gather(
                             {
                                 key: torch.tensor(values, device=accelerator.device)
@@ -955,7 +960,7 @@ def main():
                             _, log = forward(moshi_lm=moshi_lm, batch=batch, args=args)
                             for key, value in log.items():
                                 eval_logging_buffer[f"evaluation_{key}"].append(value)
-                    if args.with_tracking:
+                    if args.report_to:
                         gathered_metrics = accelerator.gather(
                             {
                                 key: torch.tensor(values, device=accelerator.device)

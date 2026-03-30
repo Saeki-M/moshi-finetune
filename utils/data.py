@@ -93,9 +93,11 @@ def make_streams_labels(
     list_of_streams: list[np.ndarray],
     initial_token_ids: list[int],
     zero_token_id: int,
+    model_user_stream: bool = True,
 ) -> list[np.ndarray]:
     """
     Make the labels for the streams.
+    When model_user_stream is False, set user audio tokens (indices 9-16) to zero_token_id.
     """
     list_of_labels = []
     for streams in list_of_streams:
@@ -108,6 +110,11 @@ def make_streams_labels(
                 label[i],
                 zero_token_id,
             )
+
+        # Set user audio tokens (indices 9-16) to zero_token_id when not modeling user stream
+        if not model_user_stream:
+            label[9:17] = zero_token_id
+
         list_of_labels.append(label)
     return list_of_labels
 
@@ -121,6 +128,7 @@ def preprocess_function(
     initial_token_ids: list[int],
     padding_token_ids: list[int],
     zero_token_id: int,
+    model_user_stream: bool = True,
 ) -> dict[str, list[Any]]:
     # 1. make main speaker streams
     list_of_streams = main_speaker_streams(
@@ -150,11 +158,12 @@ def preprocess_function(
             min_length=min_length,
         )
 
-    # 5. make labels
+    # 5. make labels (with user audio masking if not modeling user stream)
     list_of_labels = make_streams_labels(
         list_of_streams=list_of_streams,
         initial_token_ids=initial_token_ids,
         zero_token_id=zero_token_id,
+        model_user_stream=model_user_stream,
     )
 
     list_of_num_streams = [streams.shape[0] for streams in list_of_streams]
