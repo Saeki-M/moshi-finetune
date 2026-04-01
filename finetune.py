@@ -220,6 +220,12 @@ def setup_argparser(parser: argparse.ArgumentParser):
         help="Save checkpoint every X updates steps.",
     )
     parser.add_argument(
+        "--keep_last_n_checkpoints",
+        type=int,
+        default=1,
+        help="Number of most recent step checkpoints to keep. Older ones are deleted. Set to 0 to keep all.",
+    )
+    parser.add_argument(
         "--report_to",
         choices=["wandb"],
         default=None,
@@ -337,7 +343,7 @@ def postprocess_args(args: argparse.Namespace):
             raise ValueError(f"Missmatch in the config: {missmatch_args}")
 
         # restore the previous run_id
-        args.run_id_to_resume = prev_config["run_id"]
+        args.run_id_to_resume = prev_config.get("run_id")
     else:
         args.run_id_to_resume = None
 
@@ -976,6 +982,20 @@ def main():
                 if args.save_steps is not None and current_steps % args.save_steps == 0:
                     output_dir = os.path.join(args.output_dir, f"step_{current_steps}")
                     accelerator.save_state(output_dir)
+                    # Remove old checkpoints beyond keep_last_n_checkpoints
+                    if accelerator.is_main_process and args.keep_last_n_checkpoints > 0:
+                        import shutil
+                        import re as _re
+                        ckpt_dirs = sorted(
+                            [
+                                d for d in glob.glob(os.path.join(args.output_dir, "step_*"))
+                                if os.path.isdir(d) and _re.match(r".*step_\d+$", d)
+                            ],
+                            key=lambda d: int(d.rsplit("_", 1)[-1]),
+                        )
+                        for old_dir in ckpt_dirs[: -args.keep_last_n_checkpoints]:
+                            logger.info(f"Removing old checkpoint: {old_dir}")
+                            shutil.rmtree(old_dir)
 
                 # Stop training
                 if args.max_train_steps is not None and current_steps >= args.max_train_steps:

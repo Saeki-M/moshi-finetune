@@ -3,7 +3,7 @@ name = "moshi-finetune"
 version = "0.1.0"
 description = "Fine-tuning Moshi models on your own spoken dialogue data"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "accelerate==1.1.1",
     "datasets==3.1.0",
