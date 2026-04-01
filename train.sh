@@ -1,0 +1,23 @@
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run accelerate launch \
+    --num_processes 2 \
+    --num_machines 1 \
+    --use_deepspeed \
+    --deepspeed_config_file ds_configs/zero3-fp16-act_ckpt.json \
+    finetune.py \
+        --launcher accelerate \
+        --use_deepspeed \
+        --deepspeed_config_file ds_configs/zero3-fp16-act_ckpt.json \
+        --output_dir output/20260401_1950-data_balanced \
+        --train_data_files "moshi_finetune_data/parquet/*.parquet" \
+        --model_dir moshi_finetune_data/llm-jp-moshi-v1-finetuned \
+        --model_dtype float16 \
+        --max_length 2048 \
+        --min_length 128 \
+        --num_train_epochs 7 \
+        --per_device_train_batch_size 4 \
+        --gradient_accumulation_steps 1 \
+        --num_warmup_steps 100 \
+        --activation_checkpointing \
+        --logging_steps 1 \
+        --save_steps 500 \
+        --resume_from_checkpoint output/20260401_1950-data_balanced/step_3000
