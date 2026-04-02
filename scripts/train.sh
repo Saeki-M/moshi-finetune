@@ -1,3 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Change to project root so all relative paths resolve correctly
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run accelerate launch \
     --num_processes 2 \
     --num_machines 1 \

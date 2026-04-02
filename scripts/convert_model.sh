@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Change to project root so module paths and relative paths work correctly
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
 if [[ $# -ne 1 ]]; then
     echo "Usage: $0 <step_dir>"
     exit 1
@@ -19,7 +23,7 @@ fi
 if [[ -e "$cleaned_output_path" ]]; then
     echo "Skipping clean_moshi: $cleaned_output_path already exists"
 else
-    ln -s moshi_finetune_data/llm-jp-moshi-v1-finetuned/moshi_lm_kwargs.json $output_path/
+    ln -s "$SCRIPT_DIR/../moshi_finetune_data/llm-jp-moshi-v1-finetuned/moshi_lm_kwargs.json" "$output_path/"
     uv run -m tools.clean_moshi \
         --moshi_ft_dir "$output_path" \
         --save_dir "$cleaned_output_path" \
